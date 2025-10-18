@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>MELLSTROY: BAN HAMMER — VOICE EDITION</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{
+      --bg1:#0b0b0b; --bg2:#141414; --accent:#ff2d55;
+      --muted:#cfcfcf; --panel: rgba(0,0,0,0.45);
+    }
+    html,body{height:100%;margin:0;font-family: "Arial", sans-serif;background:
+      radial-gradient(circle at 20% 10%, #111 0%, #070707 40%, #000 100%); color:white;}
+    .topbar{position:fixed;left:12px;top:12px;display:flex;gap:10px;align-items:center;z-index:999;}
+    .badge{background:var(--panel);padding:8px 12px;border-radius:10px;font-weight:700;box-shadow:0 6px 18px rgba(0,0,0,0.6);}
+    #score{font-size:20px;}
+    .controls{position:fixed;right:12px;top:12px;display:flex;gap:8px;align-items:center;z-index:999;}
+    button{background:linear-gradient(180deg,#222,#111);color:white;padding:8px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.06);cursor:pointer}
+    button:active{transform:translateY(1px)}
+    .muted{opacity:0.45}
+    #game-area{position:fixed;inset:0;overflow:hidden;}
+    .target{position:absolute;width:84px;height:84px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:900;text-shadow:0 2px 6px rgba(0,0,0,0.7);cursor:pointer;user-select:none;box-shadow:0 10px 30px rgba(0,0,0,0.6)}
+    .donate{background:linear-gradient(180deg,#34d399,#059669); color:#001;}
+    .ban{background:linear-gradient(180deg,#ff7b7b,#cc1616); color:white; font-size:18px}
+    .phrase{position:fixed;left:50%;transform:translateX(-50%);top:18%;background:rgba(0,0,0,0.6);padding:10px 16px;border-radius:999px;font-weight:800;font-size:18px;z-index:1000;display:none}
+    #game-over{position:fixed;left:50%;top:45%;transform:translate(-50%,-50%);font-size:54px;color:var(--accent);display:none;text-shadow:0 4px 18px rgba(0,0,0,0.8)}
+    .hud-bottom{position:fixed;left:50%;transform:translateX(-50%);bottom:18px;display:flex;gap:12px;align-items:center;z-index:999}
+    .meter{background:rgba(255,255,255,0.06);padding:8px 10px;border-radius:8px;font-weight:700}
+    .small{font-size:13px;color:var(--muted)}
+    .big{font-size:22px}
+    .restart{background:linear-gradient(90deg,#1f2937,#0f172a);border:1px solid rgba(255,255,255,0.06)}
+    /* simple animation */
+    @keyframes pop {0%{transform:scale(.8)}50%{transform:scale(1.06)}100%{transform:scale(1)}}
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="badge" id="score">💸 Донаты: 0</div>
+    <div class="badge small" id="time">⏱ 0s</div>
+  </div>
+
+  <div class="controls">
+    <button id="voice-refresh" title="Обновить список голосов">🔄 Обновить голоса</button>
+    <button id="tts-toggle">🔊 Голос: Вкл</button>
+    <div class="badge small">Громкость</div>
+    <input id="volume" type="range" min="0" max="1" step="0.01" value="0.9" style="width:120px">
+    <button id="restart" class="restart">⟲ Перезапуск</button>
+  </div>
+
+  <div id="game-area"></div>
+  <div class="phrase" id="phrase">Где донаты, чёрт возьми?!</div>
+  <div id="game-over">🚫 ТЕБЯ ЗАБАНИЛИ! 🚫</div>
+
+  <div class="hud-bottom">
+    <div class="meter small" id="mode">Режим: Нормальный</div>
+    <div class="meter small" id="best">Рекорд: 0s</div>
+  </div>
+
+  <script>
+  // -------------------- CONFIG --------------------
+  const CONFIG = {
+    spawnInterval: 650,        // ms between spawns
+    banChance: 0.18,           // initial ban spawn chance
+    targetLifetime: 1700,      // ms before target auto-vanish
+    chaosAfter: 25 * 1000,     // after this ms mode escalates
+    phrases: [
+      "Где донаты, чёрт возьми?!",
+      "Быстрее, поставить лайк, п п п!",
+      "Кто написал бан? Удали, мод!",
+      "Я не токсичный — я воспитательный!",
+      "Донат или смерть!",
+      "Дайте мне 10 рублей, и я перестану материться... может."
+    ],
+    voiceOptions: { rate: 1.05, pitch: 0.9 }
+  };
+
+  // -------------------- STATE --------------------
+  let score = 0;
+  let gameActive = true;
+  let elapsed = 0;
+  let spawnTimer = null;
+  let startTs = null;
+  let bestRecord = 0; // seconds
+  let chaosMode = false;
+  let ttsEnabled = true;
+  let volume = 0.9;
+  let ttsVoice = null;
+  let voicesLoaded = false;
+
+  // -------------------- DOM --------------------
+  const gameArea = document.getElementById('game-area');
+  const scoreEl = document.getElementById('score');
+  const timeEl = document.getElementById('time');
+  const phraseEl = document.getElementById('phrase');
+  const gameOverEl = document.getElementById('game-over');
+  const modeEl = document.getElementById('mode');
+  const bestEl = document.getElementById('best');
+  const ttsToggle = document.getElementById('tts-toggle');
+  const restartBtn = document.getElementById('restart');
+  const voiceRefresh = document.getElementById('voice-refresh');
+  const volumeInput = document.getElementById('volume');
+
+  // -------------------- AUDIO ASSETS --------------------
+  // free effects from pixabay / freesound - CDN links (CORS friendly)
+  const SFX = {
+    coin: "https://cdn.pixabay.com/download/audio/2021/08/04/audio_77d8c18865.mp3?filename=coin-collect-6430.mp3",
+    ban:  "https://cdn.pixabay.com/download/audio/2022/03/15/audio_7f30c5e3f3.mp3?filename=game-over-arcade-6435.mp3",
+    chaos: "https://cdn.pixabay.com/download/audio/2022/04/15/audio_cc6a0d6b07.mp3?filename=impact-6072.mp3",
+    music: "https://cdn.pixabay.com/download/audio/2023/09/02/audio_e66a7efc4b.mp3?filename=trap-loop-124169.mp3"
+  };
+
+  // play simple audio helper
+  function playSfx(url, vol = 1){
+    const a = new Audio(url);
+    a.volume = vol * volume;
+    a.play().catch(()=>{/*ignore*/});
+  }
+
+  // -------------------- SPEECH --------------------
+  function loadVoicesAndPick(){
+    const synth = window.speechSynthesis;
+    let vs = synth.getVoices();
+    if (vs.length === 0) {
+      // try again shortly
+      setTimeout(loadVoicesAndPick, 250);
+      return;
+    }
+    voicesLoaded = true;
+    // pick a deep-ish russian voice if possible, otherwise fallback to first
+    const prefer = vs.find(v => /ru|russian/i.test(v.lang) || /Yuri|Alex|Jorge|Google/gi.test(v.name));
+    ttsVoice = prefer || vs[0];
+    console.log("TTS voice selected:", ttsVoice && (ttsVoice.name + " " + ttsVoice.lang));
+  }
+
+  function speak(text, opts = {}){
+    if (!ttsEnabled  !("speechSynthesis" in window)  !voicesLoaded) return;
+    try {
+      const u = new SpeechSynthesisUtterance(text);
+      u.voice = ttsVoice;
+      u.rate = opts.rate ?? CONFIG.voiceOptions.rate;
+      u.pitch = opts.pitch ?? CONFIG.voiceOptions.pitch;
+      // emulate "грубый" голос by lowering pitch and adding short noisy prefix
+      u.volume = volume;
+      window.speechSynthesis.cancel(); // cut previous for punchy lines
+      window.speechSynthesis.speak(u);
+    } catch(e){ console.warn("TTS failed:", e); }
+  }
+
+  // allow manual refresh
+  voiceRefresh.addEventListener('click', ()=>{
+    loadVoicesAndPick();
+    speak("Где мои донаты?!", {rate:1, pitch:0.8});
+  });
+
+  // toggle TTS
+  ttsToggle.addEventListener('click', ()=>{
+    ttsEnabled = !ttsEnabled;
+    ttsToggle.textContent = ttsEnabled ? "🔊 Голос: Вкл" : "🔇 Голос: Выкл";
+    ttsToggle.classList.toggle('muted', !ttsEnabled);
+    if (!ttsEnabled) window.speechSynthesis.cancel();
+  });
+
+  volumeInput.addEventListener('input', (e)=> {
+    volume = parseFloat(e.target.value);
+  });
+
+  // -------------------- GAME LOGIC --------------------
+  function spawn(){
+    if (!gameActive) return;
+    const el = document.createElement('div');
+    el.classList.add('target');
+
+    const isBan = Math.random() < (chaosMode ? CONFIG.banChance * 1.6 : CONFIG.banChance);
+    el.classList.add(isBan ? 'ban' : 'donate');
+    el.textContent = isBan ? 'BAN' : '+💰';
+
+    // random position
+    const pad = 90;
+    const x = Math.random() * (window.innerWidth - pad);
+    const y = Math.random() * (window.innerHeight - pad);
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+    el.style.animation = "pop 280ms ease";
+
+    gameArea.appendChild(el);
+
+    // click behavior
+    el.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      if (!gameActive) return;
+      if (isBan) {
+        // clicking a ban triggers instant ban (player made a mistake)
+        endGame("clicked-ban");
+      } else {
+        score++;
+        scoreEl.textContent = '💸 Донаты: ' + score;
+        playSfx(SFX.coin, 0.9);
+        showPhrase(randomItem(["Чекаю донат!", "Спасибо за донат, брат!"]), 1000);
+        el.remove();
+        // small chance to spawn donation storm
+        if (Math.random() < 0.08) donationStorm();
+      }
+    });
+
+    // auto remove after lifetime
+    setTimeout(()=>{ if (el.parentElement) el.remove(); }, CONFIG.targetLifetime + Math.random()*700);
+  }
+
+  function donationStorm(){
+    // spawns many donations quickly
+    const count = 8 + Math.floor(Math.random()*8);
+    for (let i=0;i<count;i++){
+      setTimeout(()=> spawn(), i * 90);
+    }
+    playSfx(SFX.chaos, 0.7);
+    speak("DONATION STORM! Спасибо, спасибо!", {rate:1.1, pitch:0.95});
+    showPhrase("💥 DONATION STORM 💥", 1600);
+  }
+
+  function showPhrase(text, duration = 1400){
+    phraseEl.textContent = text;
+    phraseEl.style.display = 'block';
+    phraseEl.style.animation = "pop 260ms ease";
+    if (ttsEnabled) speak(text);
+    setTimeout(()=> phraseEl.style.display = 'none', duration);
+  }
+
+  function randomItem(arr){ return arr[Math.floor(Math.random() * arr.length)]; }
+
+  function startGame(){
+    // reset
+    score = 0; elapsed = 0; gameActive = true; chaosMode = false;
+    scoreEl.textContent = '💸 Донаты: 0';
+    timeEl.textContent = '⏱ 0s';
+    modeEl.textContent = 'Режим: Нормальный';
+    gameOverEl.style.display = 'none';
+    // start music (loop)
+    startMusic();
+    startTs = Date.now();
+    spawnTimer = setInterval(()=> {
+      spawn();
+      // occasionally show small taunt
+      if (Math.random() < 0.06) showPhrase(randomItem(CONFIG.phrases), 1200);
+    }, CONFIG.spawnInterval);
+
+    // time ticker
+    requestAnimationFrame(tick);
+    // escalate after CONFIG.chaosAfter
+    setTimeout(()=> {
+      if (!gameActive) return;
+      chaosMode = true;
+      modeEl.textContent = 'Режим: Хаос';
+      showPhrase("⚠️ TWITCH WARNING: слишком много флекса!", 2000);
+      speak("Внимание! Режим Хаос активирован. Готовься к бану!", {rate:1, pitch:0.7});
+    }, CONFIG.chaosAfter);
+  }
+
+  function endGame(reason = "ban"){
+    if (!gameActive) return;
+    gameActive = false;
+    clearInterval(spawnTimer);
+    // stop music
+    stopMusic();
+    // show game over
+    gameOverEl.style.display = 'block';
+    playSfx(SFX.ban, 1);
+    // speak final lines
+    const lines = {
+      clicked-ban: "Ну ты и лох — сам себя забанил!",
+      ban: "Пожалуй, всё, бан прилетел. Конец трансляции."
+    };
+    const line = lines[reason] || lines.ban;
+    speak(line, {rate:0.95, pitch:0.7});
+    showPhrase("🚫 ТЕБЯ ЗАБАНИЛИ!", 10000);
+
+    // record time
+    const survived = Math.floor((Date.now() - startTs) / 1000);
+    if (survived > bestRecord) bestRecord = survived;
+    bestEl.textContent = 'Рекорд: ' + bestRecord + 's';
+  }
+
+  // restart button
+  restartBtn.addEventListener('click', ()=>{
+    // clear targets
+    document.querySelectorAll('.target').forEach(e => e.remove());
+    startGame();
+  });
+
+  // clicking the background does nothing (but could be used for special action)
+  gameArea.addEventListener('click', (e)=> {
+    // occasional reckless click (simulate accidental click on ban)
+    if (!gameActive) return;
+    if (Math.random() < 0.01) {
+      // create a fake ban under cursor
+      const b = document.createElement('div'); b.className='target ban'; b.textContent='BAN';
+      b.style.left = (e.clientX - 42) + 'px'; b.style.top = (e.clientY - 42) + 'px';
+      gameArea.appendChild(b);
+      setTimeout(()=> b.remove(), 900);
+    }
+  });
+
+  // -------------------- MUSIC CONTROL --------------------
+  let musicAudio = null;
+  function startMusic(){
+    if (musicAudio) { musicAudio.pause(); musicAudio = null; }
+    musicAudio = new Audio(SFX.music);
+    musicAudio.loop = true;
+    musicAudio.volume = 0.14 * volume;
+    musicAudio.play().
+    catch(()=>{/*autoplay blocked; will play on first user interaction*/});
+  }
+  function stopMusic(){ if (musicAudio) { musicAudio.pause(); musicAudio = null; } }
+
+  // -------------------- TIME TICKER --------------------
+  function tick(){
+    if (!gameActive) return;
+    elapsed = Math.floor((Date.now() - startTs) / 1000);
+    timeEl.textContent = '⏱ ' + elapsed + 's';
+    // gradually increase difficulty
+    if (elapsed % 10 === 0 && elapsed > 0) {
+      // slightly increase spawn frequency and ban chance
+      if (CONFIG.spawnInterval > 220) {
+        // no dynamic change to base config here, but we can sometimes spawn extra
+        if (Math.random() < 0.35) spawn();
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  // -------------------- INIT --------------------
+  // load voices
+  if ("speechSynthesis" in window) {
+    loadVoicesAndPick();
+    window.speechSynthesis.onvoiceschanged = loadVoicesAndPick;
+  } else {
+    console.warn("TTS not supported in this browser.");
+    ttsToggle.disabled = true;
+    ttsToggle.textContent = "TTS не доступен";
+  }
+
+  // start once user interacts to satisfy autoplay policy
+  function onFirstInteraction(){
+    document.removeEventListener('click', onFirstInteraction);
+    // ensure voices loaded
+    loadVoicesAndPick();
+    // start game
+    startGame();
+    // small intro line
+    showPhrase("MELLSTROY: BAN HAMMER — Поехали!", 1600);
+    speak("Поехали! Где донаты?!", {rate:1.05, pitch:0.85});
+  }
+  document.addEventListener('click', onFirstInteraction, {once:true});
+
+  // show short help
+  showPhrase("Кликни где-нибудь, чтобы начать. Кликаешь по зелёному — донат, по красному — бан.", 4000);
+
+  // expose some helpers for debugging
+  window._mell = { startGame, endGame, spawn, speak };
+
+  </script>
+</body>
+</html>
